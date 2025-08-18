@@ -51,10 +51,74 @@ export class SnowflakeRestClient {
 
       this.sessionToken = authResponse.data.token;
       console.log('Snowflake authentication successful');
+
+      // Immediately set warehouse after authentication
+      if (this.config.warehouse) {
+        try {
+          console.log(`Setting warehouse: ${this.config.warehouse}`);
+          await this.executeQueryDirect(`USE WAREHOUSE ${this.config.warehouse}`);
+          console.log('Warehouse set successfully');
+        } catch (error) {
+          console.warn('Could not set warehouse:', error);
+          // Don't fail authentication if warehouse setting fails
+        }
+      }
+
       return true;
     } catch (error) {
       console.error('Snowflake authentication error:', error);
       return false;
+    }
+  }
+
+  // Direct query execution without warehouse check (used internally)
+  private async executeQueryDirect(sql: string): Promise<any[][]> {
+    if (!this.sessionToken) {
+      throw new Error('No session token available');
+    }
+
+    try {
+      console.log(`Executing direct Snowflake query: ${sql}`);
+      
+      const requestBody = {
+        sqlText: sql,
+        asyncExec: false,
+        sequenceId: Date.now(),
+        parameters: {
+          MULTI_STATEMENT_COUNT: 1,
+          TIMESTAMP_OUTPUT_FORMAT: 'YYYY-MM-DD HH24:MI:SS.FF3'
+        }
+      };
+
+      const response = await fetch(`${this.baseUrl}/queries/v1/query-request`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Snowflake Token="${this.sessionToken}"`,
+          'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT'
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Snowflake query failed: ${response.status} - ${errorText}`);
+        throw new Error(`Snowflake query failed: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+      
+      if (!result.success) {
+        console.error('Snowflake query execution failed:', result);
+        throw new Error(`Query error: ${result.message || 'Unknown error'}`);
+      }
+
+      console.log(`Query executed successfully, returned ${result.data?.rowset?.length || 0} rows`);
+      return result.data?.rowset || [];
+    } catch (error) {
+      console.error('Snowflake query execution error:', error);
+      throw error;
     }
   }
 
@@ -66,55 +130,7 @@ export class SnowflakeRestClient {
       }
     }
 
-    try {
-      console.log(`Executing Snowflake query: ${sql}`);
-      
-      const requestBody = {
-        sqlText: sql,
-        asyncExec: false,
-        sequenceId: 0,
-        warehouse: this.config.warehouse || 'COMPUTE_WH_PARTICIPANT'
-      };
-
-      const response = await fetch(`${this.baseUrl}/queries/v1/query-request`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Snowflake Token="${this.sessionToken}"`
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Snowflake query failed: ${response.status} - ${errorText}`);
-        
-        // Try re-authentication if unauthorized
-        if (response.status === 401 || response.status === 403) {
-          this.sessionToken = null;
-          const authenticated = await this.authenticate();
-          if (authenticated) {
-            return this.executeQuery(sql);
-          }
-        }
-        
-        throw new Error(`Snowflake query failed: ${response.status} - ${errorText}`);
-      }
-
-      const result = await response.json();
-      
-      if (!result.success) {
-        console.error('Snowflake query execution failed:', result);
-        throw new Error(`Query execution failed: ${JSON.stringify(result)}`);
-      }
-
-      console.log(`Query executed successfully, returned ${result.data?.rowset?.length || 0} rows`);
-      return result.data?.rowset || [];
-    } catch (error) {
-      console.error('Snowflake query execution error:', error);
-      throw error;
-    }
+    return this.executeQueryDirect(sql);
   }
 
   async listDatabases(): Promise<Array<{ name: string; display_name: string }>> {
