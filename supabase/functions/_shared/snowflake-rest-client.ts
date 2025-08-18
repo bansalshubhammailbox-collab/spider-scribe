@@ -1,79 +1,138 @@
-import snowflake from "npm:snowflake-sdk@1.9.0";
-
 interface SnowflakeConfig {
   account: string;
   user: string;
   password: string;
   warehouse?: string;
-  role?: string;
 }
 
 export class SnowflakeRestClient {
   private config: SnowflakeConfig;
-  private connection: any = null;
+  private sessionToken: string | null = null;
+  private masterToken: string | null = null;
+  private baseUrl: string;
 
   constructor(config: SnowflakeConfig) {
     this.config = config;
+    this.baseUrl = `https://${config.account}.snowflakecomputing.com`;
   }
 
-  private async getConnection(): Promise<any> {
-    if (this.connection) {
-      return this.connection;
+  async authenticate(): Promise<boolean> {
+    try {
+      console.log(`🔐 Authenticating with Snowflake account: ${this.config.account}`);
+      
+      const response = await fetch(`${this.baseUrl}/session/v1/login-request`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          data: {
+            ACCOUNT_NAME: this.config.account,
+            LOGIN_NAME: this.config.user,
+            PASSWORD: this.config.password,
+            CLIENT_APP_ID: "JavaScript",
+            CLIENT_APP_VERSION: "1.6.0",
+          }
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ Auth failed:', response.status, errorText);
+        return false;
+      }
+
+      const result = await response.json();
+
+      if (result.success && result.data) {
+        this.sessionToken = result.data.token;
+        this.masterToken = result.data.masterToken;
+        console.log('✅ Snowflake authentication successful');
+        return true;
+      }
+
+      console.error('❌ Auth failed:', result.message);
+      return false;
+    } catch (error) {
+      console.error('❌ Auth error:', error);
+      return false;
     }
-
-    console.log(`Connecting to Snowflake account: ${this.config.account}, user: ${this.config.user}`);
-    
-    return new Promise((resolve, reject) => {
-      this.connection = snowflake.createConnection({
-        account: this.config.account,
-        username: this.config.user,
-        password: this.config.password,
-        warehouse: this.config.warehouse || 'COMPUTE_WH_PARTICIPANT',
-        role: this.config.role || 'PARTICIPANT'
-      });
-
-      this.connection.connect((err: any, conn: any) => {
-        if (err) {
-          console.error('Snowflake connection failed:', err);
-          reject(new Error(`Failed to connect to Snowflake: ${err.message}`));
-        } else {
-          console.log('Snowflake connection successful');
-          resolve(conn);
-        }
-      });
-    });
   }
 
   async executeQuery(sql: string): Promise<any[][]> {
-    const conn = await this.getConnection();
-    
-    console.log(`Executing Snowflake query: ${sql}`);
-    
-    return new Promise((resolve, reject) => {
-      conn.execute({
-        sqlText: sql,
-        complete: (err: any, stmt: any, rows: any[]) => {
-          if (err) {
-            console.error('Snowflake query failed:', err);
-            reject(new Error(`Query failed: ${err.message}`));
-          } else {
-            console.log(`Query executed successfully, returned ${rows?.length || 0} rows`);
-            resolve(rows || []);
+    if (!this.sessionToken && !(await this.authenticate())) {
+      throw new Error('Authentication failed');
+    }
+
+    try {
+      console.log(`🔍 Executing query: ${sql.substring(0, 50)}...`);
+      
+      const response = await fetch(`${this.baseUrl}/queries/v1/query-request`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Snowflake Token="${this.sessionToken}"`,
+        },
+        body: JSON.stringify({
+          sqlText: sql,
+          asyncExec: false,
+          sequenceId: Math.floor(Math.random() * 1000000),
+          querySubmissionTime: Date.now()
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ Query failed:', response.status, errorText);
+
+        // Try to re-authenticate on 401/403
+        if (response.status === 401 || response.status === 403) {
+          console.log('🔄 Re-authenticating...');
+          this.sessionToken = null;
+          if (await this.authenticate()) {
+            return this.executeQuery(sql); // Retry once
           }
         }
-      });
-    });
+
+        throw new Error(`Query failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      if (!result.success) {
+        console.error('❌ Query error:', result.message);
+        throw new Error(`Query error: ${result.message}`);
+      }
+
+      const rowCount = result.data?.rowset?.length || 0;
+      console.log(`✅ Query successful, returned ${rowCount} rows`);
+      return result.data?.rowset || [];
+    } catch (error) {
+      console.error('❌ Execute query error:', error);
+      throw error;
+    }
   }
 
   async listDatabases(): Promise<Array<{ name: string; display_name: string }>> {
-    const rows = await this.executeQuery('SHOW DATABASES');
-    
-    return rows
-      .filter(row => row && row[1] && row[1].toString().includes('SPIDER2_'))
-      .map(row => ({
-        name: row[1].toString(),
-        display_name: row[1].toString().replace('SPIDER2_', '')
-      }));
+    try {
+      console.log('🔍 Listing databases...');
+      const rows = await this.executeQuery('SHOW DATABASES');
+
+      const databases = rows
+        .filter(row => row && row[1] && row[1].toString().includes('SPIDER2_'))
+        .map(row => ({
+          name: row[1].toString(),
+          display_name: row[1].toString().replace('SPIDER2_', '')
+        }));
+
+      console.log(`✅ Found ${databases.length} Spider2 databases`);
+      return databases;
+    } catch (error) {
+      console.error('❌ List databases failed:', error);
+      throw error;
+    }
   }
 
   async getSchemas(database: string): Promise<string[]> {
@@ -115,41 +174,20 @@ export class SnowflakeRestClient {
     const rows = await this.executeQuery(`SELECT * FROM ${schema}.${table} LIMIT ${limit}`);
     return rows;
   }
-
-  async destroy(): Promise<void> {
-    if (this.connection) {
-      return new Promise((resolve) => {
-        this.connection.destroy((err: any) => {
-          if (err) {
-            console.warn('Error destroying Snowflake connection:', err);
-          } else {
-            console.log('Snowflake connection destroyed');
-          }
-          this.connection = null;
-          resolve();
-        });
-      });
-    }
-  }
 }
 
 export function createSnowflakeClient(): SnowflakeRestClient {
-  const account = Deno.env.get('SNOWFLAKE_ACCOUNT');
-  const user = Deno.env.get('SNOWFLAKE_USER');
-  const password = Deno.env.get('SNOWFLAKE_PASSWORD');
-  const warehouse = Deno.env.get('SNOWFLAKE_WAREHOUSE');
+  const config = {
+    account: Deno.env.get('SNOWFLAKE_ACCOUNT')!,
+    user: Deno.env.get('SNOWFLAKE_USER')!,
+    password: Deno.env.get('SNOWFLAKE_PASSWORD')!,
+    warehouse: Deno.env.get('SNOWFLAKE_WAREHOUSE'),
+  };
 
-  if (!account || !user || !password) {
-    throw new Error('Missing required Snowflake environment variables: SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD');
+  if (!config.account || !config.user || !config.password) {
+    throw new Error('Missing Snowflake credentials: SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD');
   }
 
-  console.log(`Creating Snowflake client for account: ${account}, user: ${user}, warehouse: ${warehouse || 'COMPUTE_WH_PARTICIPANT'}`);
-
-  return new SnowflakeRestClient({
-    account,
-    user,
-    password,
-    warehouse: warehouse || 'COMPUTE_WH_PARTICIPANT',
-    role: 'PARTICIPANT'
-  });
+  console.log(`🚀 Creating Snowflake client for account: ${config.account}, user: ${config.user}`);
+  return new SnowflakeRestClient(config);
 }
