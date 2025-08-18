@@ -1,4 +1,4 @@
-import { Connection, createConnection } from "npm:snowflake-sdk@1.9.0";
+import snowflake from "npm:snowflake-sdk@1.9.0";
 
 interface SnowflakeConfig {
   account: string;
@@ -10,13 +10,13 @@ interface SnowflakeConfig {
 
 export class SnowflakeRestClient {
   private config: SnowflakeConfig;
-  private connection: Connection | null = null;
+  private connection: any = null;
 
   constructor(config: SnowflakeConfig) {
     this.config = config;
   }
 
-  private async getConnection(): Promise<Connection> {
+  private async getConnection(): Promise<any> {
     if (this.connection) {
       return this.connection;
     }
@@ -24,7 +24,7 @@ export class SnowflakeRestClient {
     console.log(`Connecting to Snowflake account: ${this.config.account}, user: ${this.config.user}`);
     
     return new Promise((resolve, reject) => {
-      this.connection = createConnection({
+      this.connection = snowflake.createConnection({
         account: this.config.account,
         username: this.config.user,
         password: this.config.password,
@@ -32,7 +32,7 @@ export class SnowflakeRestClient {
         role: this.config.role || 'PARTICIPANT'
       });
 
-      this.connection.connect((err, conn) => {
+      this.connection.connect((err: any, conn: any) => {
         if (err) {
           console.error('Snowflake connection failed:', err);
           reject(new Error(`Failed to connect to Snowflake: ${err.message}`));
@@ -52,7 +52,7 @@ export class SnowflakeRestClient {
     return new Promise((resolve, reject) => {
       conn.execute({
         sqlText: sql,
-        complete: (err, stmt, rows) => {
+        complete: (err: any, stmt: any, rows: any[]) => {
           if (err) {
             console.error('Snowflake query failed:', err);
             reject(new Error(`Query failed: ${err.message}`));
@@ -119,7 +119,7 @@ export class SnowflakeRestClient {
   async destroy(): Promise<void> {
     if (this.connection) {
       return new Promise((resolve) => {
-        this.connection!.destroy((err) => {
+        this.connection.destroy((err: any) => {
           if (err) {
             console.warn('Error destroying Snowflake connection:', err);
           } else {
