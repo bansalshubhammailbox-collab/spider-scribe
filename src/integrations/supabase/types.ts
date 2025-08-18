@@ -14,7 +14,146 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      annotation_files: {
+        Row: {
+          annotations_data: Json
+          created_at: string
+          database_name: string
+          file_name: string
+          file_size: number
+          id: string
+          sample_rows: number
+        }
+        Insert: {
+          annotations_data: Json
+          created_at?: string
+          database_name: string
+          file_name: string
+          file_size?: number
+          id?: string
+          sample_rows: number
+        }
+        Update: {
+          annotations_data?: Json
+          created_at?: string
+          database_name?: string
+          file_name?: string
+          file_size?: number
+          id?: string
+          sample_rows?: number
+        }
+        Relationships: []
+      }
+      schema_files: {
+        Row: {
+          created_at: string
+          database_name: string
+          extraction_duration: number
+          file_name: string
+          id: string
+          sample_rows: number
+          schema_data: Json
+        }
+        Insert: {
+          created_at?: string
+          database_name: string
+          extraction_duration?: number
+          file_name: string
+          id?: string
+          sample_rows: number
+          schema_data: Json
+        }
+        Update: {
+          created_at?: string
+          database_name?: string
+          extraction_duration?: number
+          file_name?: string
+          id?: string
+          sample_rows?: number
+          schema_data?: Json
+        }
+        Relationships: []
+      }
+      test_results: {
+        Row: {
+          baseline_execution: Json | null
+          baseline_sql: string
+          created_at: string
+          full_context_execution: Json | null
+          full_context_sql: string
+          id: string
+          question: string
+          schema_only_execution: Json | null
+          schema_only_sql: string
+          session_id: string
+        }
+        Insert: {
+          baseline_execution?: Json | null
+          baseline_sql: string
+          created_at?: string
+          full_context_execution?: Json | null
+          full_context_sql: string
+          id?: string
+          question: string
+          schema_only_execution?: Json | null
+          schema_only_sql: string
+          session_id: string
+        }
+        Update: {
+          baseline_execution?: Json | null
+          baseline_sql?: string
+          created_at?: string
+          full_context_execution?: Json | null
+          full_context_sql?: string
+          id?: string
+          question?: string
+          schema_only_execution?: Json | null
+          schema_only_sql?: string
+          session_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "test_results_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "test_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      test_sessions: {
+        Row: {
+          created_at: string
+          custom_prompt: string | null
+          database: string
+          id: string
+          metadata: Json | null
+          session_name: string
+          success_rates: Json | null
+          total_questions: number
+        }
+        Insert: {
+          created_at?: string
+          custom_prompt?: string | null
+          database: string
+          id?: string
+          metadata?: Json | null
+          session_name: string
+          success_rates?: Json | null
+          total_questions?: number
+        }
+        Update: {
+          created_at?: string
+          custom_prompt?: string | null
+          database?: string
+          id?: string
+          metadata?: Json | null
+          session_name?: string
+          success_rates?: Json | null
+          total_questions?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
