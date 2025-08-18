@@ -15,11 +15,14 @@ serve(async (req) => {
   try {
     console.log('Starting database listing from Snowflake Spider2');
     
-    // Create Snowflake client using the shared REST client
+    // Create Snowflake client using the proven npm package approach
     const client = createSnowflakeClient();
     
-    // List all Spider2 databases
+    // List all Spider2 databases using proven approach
     const databases = await client.listDatabases();
+    
+    // Clean up connection
+    await client.destroy();
     
     // Format for frontend consumption
     const formattedDatabases = databases.map(db => ({

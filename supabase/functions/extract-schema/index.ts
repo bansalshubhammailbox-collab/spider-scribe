@@ -27,7 +27,7 @@ serve(async (req) => {
 
     console.log(`Extracting schema for database: ${database} with ${sampleRows} sample rows`);
     
-    // Create Snowflake client using the shared REST client
+    // Create Snowflake client using the proven npm package approach
     const client = createSnowflakeClient();
     
     const startTime = performance.now();
@@ -93,6 +93,9 @@ serve(async (req) => {
     }
 
     const extractionDuration = Math.round(performance.now() - startTime);
+    
+    // Clean up connection
+    await client.destroy();
     
     // Store in Supabase
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;

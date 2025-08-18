@@ -1,140 +1,72 @@
+import { Connection, createConnection } from "npm:snowflake-sdk@1.9.0";
+
 interface SnowflakeConfig {
   account: string;
   user: string;
   password: string;
   warehouse?: string;
+  role?: string;
 }
 
 export class SnowflakeRestClient {
   private config: SnowflakeConfig;
-  private sessionToken: string | null = null;
-  private baseUrl: string;
+  private connection: Connection | null = null;
 
   constructor(config: SnowflakeConfig) {
     this.config = config;
-    this.baseUrl = `https://${config.account}.snowflakecomputing.com`;
   }
 
-  async authenticate(): Promise<boolean> {
-    try {
-      console.log(`Authenticating with Snowflake account: ${this.config.account}`);
-      
-      const response = await fetch(`${this.baseUrl}/session/v1/login-request`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify({
-          data: {
-            ACCOUNT_NAME: this.config.account,
-            LOGIN_NAME: this.config.user,
-            PASSWORD: this.config.password,
-            CLIENT_APP_ID: "JavaScriptDriver",
-            CLIENT_APP_VERSION: "1.6.0"
-          }
-        }),
+  private async getConnection(): Promise<Connection> {
+    if (this.connection) {
+      return this.connection;
+    }
+
+    console.log(`Connecting to Snowflake account: ${this.config.account}, user: ${this.config.user}`);
+    
+    return new Promise((resolve, reject) => {
+      this.connection = createConnection({
+        account: this.config.account,
+        username: this.config.user,
+        password: this.config.password,
+        warehouse: this.config.warehouse || 'COMPUTE_WH_PARTICIPANT',
+        role: this.config.role || 'PARTICIPANT'
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Snowflake auth failed: ${response.status} - ${errorText}`);
-        return false;
-      }
-
-      const authResponse = await response.json();
-      
-      if (!authResponse.success) {
-        console.error('Snowflake authentication failed:', authResponse);
-        return false;
-      }
-
-      this.sessionToken = authResponse.data.token;
-      console.log('Snowflake authentication successful');
-
-      // Immediately set warehouse after authentication
-      if (this.config.warehouse) {
-        try {
-          console.log(`Setting warehouse: ${this.config.warehouse}`);
-          await this.executeQueryDirect(`USE WAREHOUSE ${this.config.warehouse}`);
-          console.log('Warehouse set successfully');
-        } catch (error) {
-          console.warn('Could not set warehouse:', error);
-          // Don't fail authentication if warehouse setting fails
+      this.connection.connect((err, conn) => {
+        if (err) {
+          console.error('Snowflake connection failed:', err);
+          reject(new Error(`Failed to connect to Snowflake: ${err.message}`));
+        } else {
+          console.log('Snowflake connection successful');
+          resolve(conn);
         }
-      }
-
-      return true;
-    } catch (error) {
-      console.error('Snowflake authentication error:', error);
-      return false;
-    }
-  }
-
-  // Direct query execution without warehouse check (used internally)
-  private async executeQueryDirect(sql: string): Promise<any[][]> {
-    if (!this.sessionToken) {
-      throw new Error('No session token available');
-    }
-
-    try {
-      console.log(`Executing direct Snowflake query: ${sql}`);
-      
-      const requestBody = {
-        sqlText: sql,
-        asyncExec: false,
-        sequenceId: Date.now(),
-        parameters: {
-          MULTI_STATEMENT_COUNT: 1,
-          TIMESTAMP_OUTPUT_FORMAT: 'YYYY-MM-DD HH24:MI:SS.FF3'
-        }
-      };
-
-      const response = await fetch(`${this.baseUrl}/queries/v1/query-request`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Snowflake Token="${this.sessionToken}"`,
-          'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT'
-        },
-        body: JSON.stringify(requestBody),
       });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Snowflake query failed: ${response.status} - ${errorText}`);
-        throw new Error(`Snowflake query failed: ${response.status} - ${errorText}`);
-      }
-
-      const result = await response.json();
-      
-      if (!result.success) {
-        console.error('Snowflake query execution failed:', result);
-        throw new Error(`Query error: ${result.message || 'Unknown error'}`);
-      }
-
-      console.log(`Query executed successfully, returned ${result.data?.rowset?.length || 0} rows`);
-      return result.data?.rowset || [];
-    } catch (error) {
-      console.error('Snowflake query execution error:', error);
-      throw error;
-    }
+    });
   }
 
   async executeQuery(sql: string): Promise<any[][]> {
-    if (!this.sessionToken) {
-      const authenticated = await this.authenticate();
-      if (!authenticated) {
-        throw new Error('Failed to authenticate with Snowflake');
-      }
-    }
-
-    return this.executeQueryDirect(sql);
+    const conn = await this.getConnection();
+    
+    console.log(`Executing Snowflake query: ${sql}`);
+    
+    return new Promise((resolve, reject) => {
+      conn.execute({
+        sqlText: sql,
+        complete: (err, stmt, rows) => {
+          if (err) {
+            console.error('Snowflake query failed:', err);
+            reject(new Error(`Query failed: ${err.message}`));
+          } else {
+            console.log(`Query executed successfully, returned ${rows?.length || 0} rows`);
+            resolve(rows || []);
+          }
+        }
+      });
+    });
   }
 
   async listDatabases(): Promise<Array<{ name: string; display_name: string }>> {
-    const rows = await this.executeQuery('SHOW DATABASES IN ACCOUNT');
+    const rows = await this.executeQuery('SHOW DATABASES');
     
     return rows
       .filter(row => row && row[1] && row[1].toString().includes('SPIDER2_'))
@@ -183,6 +115,22 @@ export class SnowflakeRestClient {
     const rows = await this.executeQuery(`SELECT * FROM ${schema}.${table} LIMIT ${limit}`);
     return rows;
   }
+
+  async destroy(): Promise<void> {
+    if (this.connection) {
+      return new Promise((resolve) => {
+        this.connection!.destroy((err) => {
+          if (err) {
+            console.warn('Error destroying Snowflake connection:', err);
+          } else {
+            console.log('Snowflake connection destroyed');
+          }
+          this.connection = null;
+          resolve();
+        });
+      });
+    }
+  }
 }
 
 export function createSnowflakeClient(): SnowflakeRestClient {
@@ -202,5 +150,6 @@ export function createSnowflakeClient(): SnowflakeRestClient {
     user,
     password,
     warehouse: warehouse || 'COMPUTE_WH_PARTICIPANT',
+    role: 'PARTICIPANT'
   });
 }
