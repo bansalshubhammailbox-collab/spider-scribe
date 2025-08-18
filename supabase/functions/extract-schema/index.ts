@@ -1,4 +1,3 @@
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -6,6 +5,66 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+// Create a session and execute queries with Snowflake REST API
+async function createSnowflakeSession(account: string, username: string, password: string, warehouse: string) {
+  const loginUrl = `https://${account}.snowflakecomputing.com/session/v1/login-request`;
+  
+  const loginResponse = await fetch(loginUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    body: JSON.stringify({
+      data: {
+        ACCOUNT_NAME: account,
+        LOGIN_NAME: username,  
+        PASSWORD: password
+      }
+    })
+  });
+
+  if (!loginResponse.ok) {
+    const errorText = await loginResponse.text();
+    throw new Error(`Snowflake login failed: ${loginResponse.status} - ${errorText}`);
+  }
+
+  const loginResult = await loginResponse.json();
+  return loginResult.data;
+}
+
+async function executeSnowflakeQuery(sessionData: any, account: string, sqlText: string, warehouse?: string) {
+  const queryUrl = `https://${account}.snowflakecomputing.com/queries/v1/query-request`;
+  
+  const body: any = {
+    sqlText,
+    sequenceId: Date.now()
+  };
+  
+  if (warehouse) {
+    body.warehouse = warehouse;
+  }
+
+  const response = await fetch(queryUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Snowflake Token="${sessionData.token}"`,
+      'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Snowflake query failed: ${response.status} - ${errorText}`);
+  }
+
+  const result = await response.json();
+  return result;
+}
 
 serve(async (req) => {
   // Handle CORS preflight requests
@@ -42,146 +101,77 @@ serve(async (req) => {
       });
     }
 
-    // Import Snowflake SDK
-    const snowflake = await import('https://cdn.skypack.dev/snowflake-sdk@2.2.0');
+    console.log('Creating Snowflake session...');
+    const sessionData = await createSnowflakeSession(snowflakeAccount, snowflakeUser, snowflakePassword, snowflakeWarehouse);
     
-    // Create connection
-    const connection = snowflake.createConnection({
-      account: snowflakeAccount,
-      username: snowflakeUser,
-      password: snowflakePassword,
-      warehouse: snowflakeWarehouse,
-    });
-
-    // Connect
-    await new Promise((resolve, reject) => {
-      connection.connect((err: any, conn: any) => {
-        if (err) {
-          console.error('Failed to connect to Snowflake:', err);
-          reject(err);
-        } else {
-          resolve(conn);
-        }
-      });
-    });
-
     const startTime = performance.now();
     
     // Use database with SPIDER2_ prefix
     const fullDatabaseName = database.startsWith('SPIDER2_') ? database : `SPIDER2_${database}`;
     
-    // Extract schema structure
-    const schemaData = await new Promise((resolve, reject) => {
-      connection.execute({
-        sqlText: `USE DATABASE ${fullDatabaseName}`,
-        complete: async (err: any) => {
-          if (err) {
-            console.error('Error using database:', err);
-            reject(err);
-            return;
-          }
+    console.log(`Using database: ${fullDatabaseName}`);
+    await executeSnowflakeQuery(sessionData, snowflakeAccount, `USE DATABASE ${fullDatabaseName}`, snowflakeWarehouse);
+    
+    // Get schemas
+    console.log('Getting schemas...');
+    const schemasResult = await executeSnowflakeQuery(sessionData, snowflakeAccount, 'SHOW SCHEMAS', snowflakeWarehouse);
+    const schemas = schemasResult.data?.map((row: any) => row[1]).filter((name: string) => name !== 'INFORMATION_SCHEMA') || [];
+    
+    const schemaStructure: any = {};
 
+    // For each schema, get tables and columns
+    for (const schemaName of schemas) {
+      console.log(`Processing schema: ${schemaName}`);
+      schemaStructure[schemaName] = { tables: {} };
+
+      // Get tables in schema
+      const tablesResult = await executeSnowflakeQuery(sessionData, snowflakeAccount, `SHOW TABLES IN SCHEMA ${schemaName}`, snowflakeWarehouse);
+      const tables = tablesResult.data?.map((row: any) => row[1]) || [];
+
+      // For each table, get columns and sample data
+      for (const tableName of tables) {
+        console.log(`Processing table: ${schemaName}.${tableName}`);
+        
+        // Get column descriptions
+        const columnsResult = await executeSnowflakeQuery(sessionData, snowflakeAccount, `DESCRIBE TABLE ${schemaName}.${tableName}`, snowflakeWarehouse);
+        const columns = columnsResult.data?.map((row: any) => ({
+          name: row[0],
+          type: row[1],
+          kind: row[2],
+          null: row[3] === 'Y',
+          default: row[4],
+          primary_key: row[5] === 'Y',
+          unique_key: row[6] === 'Y',
+          check: row[7] === 'Y',
+          expression: row[8],
+          comment: row[9]
+        })) || [];
+
+        // Get sample data if requested
+        let sampleData: any[][] = [];
+        if (sampleRows > 0) {
           try {
-            // Get schemas
-            const schemas = await new Promise((resolve, reject) => {
-              connection.execute({
-                sqlText: 'SHOW SCHEMAS',
-                complete: (err: any, stmt: any, rows: any) => {
-                  if (err) reject(err);
-                  else resolve(rows.map((row: any) => row.name));
-                }
-              });
-            });
-
-            const schemaStructure: any = {};
-
-            // For each schema, get tables and columns
-            for (const schemaName of schemas as string[]) {
-              if (schemaName === 'INFORMATION_SCHEMA') continue; // Skip system schema
-              
-              console.log(`Processing schema: ${schemaName}`);
-              schemaStructure[schemaName] = { tables: {} };
-
-              // Get tables in schema
-              const tables = await new Promise((resolve, reject) => {
-                connection.execute({
-                  sqlText: `SHOW TABLES IN SCHEMA ${schemaName}`,
-                  complete: (err: any, stmt: any, rows: any) => {
-                    if (err) reject(err);
-                    else resolve(rows.map((row: any) => row.name));
-                  }
-                });
-              });
-
-              // For each table, get columns and sample data
-              for (const tableName of tables as string[]) {
-                console.log(`Processing table: ${schemaName}.${tableName}`);
-                
-                // Get column descriptions
-                const columns = await new Promise((resolve, reject) => {
-                  connection.execute({
-                    sqlText: `DESCRIBE TABLE ${schemaName}.${tableName}`,
-                    complete: (err: any, stmt: any, rows: any) => {
-                      if (err) reject(err);
-                      else resolve(rows.map((row: any) => ({
-                        name: row.name,
-                        type: row.type,
-                        kind: row.kind,
-                        null: row.null === 'Y',
-                        default: row.default,
-                        primary_key: row.primary_key === 'Y',
-                        unique_key: row.unique_key === 'Y',
-                        check: row.check === 'Y',
-                        expression: row.expression,
-                        comment: row.comment
-                      })));
-                    }
-                  });
-                });
-
-                // Get sample data if requested
-                let sampleData: any[][] = [];
-                if (sampleRows > 0) {
-                  try {
-                    sampleData = await new Promise((resolve, reject) => {
-                      connection.execute({
-                        sqlText: `SELECT * FROM ${schemaName}.${tableName} LIMIT ${sampleRows}`,
-                        complete: (err: any, stmt: any, rows: any) => {
-                          if (err) {
-                            console.warn(`Could not sample data from ${schemaName}.${tableName}:`, err.message);
-                            resolve([]);
-                          } else {
-                            resolve(rows || []);
-                          }
-                        }
-                      });
-                    });
-                  } catch (error) {
-                    console.warn(`Error sampling data from ${schemaName}.${tableName}:`, error);
-                  }
-                }
-
-                schemaStructure[schemaName].tables[tableName] = {
-                  columns,
-                  sample_data: sampleData
-                };
-              }
-            }
-
-            resolve({
-              database: fullDatabaseName,
-              display_name: database,
-              sample_rows: sampleRows,
-              extraction_timestamp: new Date().toISOString(),
-              schemas: schemaStructure
-            });
-
+            const sampleResult = await executeSnowflakeQuery(sessionData, snowflakeAccount, `SELECT * FROM ${schemaName}.${tableName} LIMIT ${sampleRows}`);
+            sampleData = sampleResult.data || [];
           } catch (error) {
-            reject(error);
+            console.warn(`Could not sample data from ${schemaName}.${tableName}:`, error);
           }
         }
-      });
-    });
+
+        schemaStructure[schemaName].tables[tableName] = {
+          columns,
+          sample_data: sampleData
+        };
+      }
+    }
+
+    const schemaData = {
+      database: fullDatabaseName,
+      display_name: database,
+      sample_rows: sampleRows,
+      extraction_timestamp: new Date().toISOString(),
+      schemas: schemaStructure
+    };
 
     const extractionDuration = Math.round(performance.now() - startTime);
     
@@ -206,9 +196,6 @@ serve(async (req) => {
     } else {
       console.log(`Schema stored in Supabase: ${fileName}`);
     }
-
-    // Close connection
-    connection.destroy();
 
     return new Response(JSON.stringify({
       ...schemaData,

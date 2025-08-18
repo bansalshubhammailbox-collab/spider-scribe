@@ -1,11 +1,69 @@
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+// Function to make authenticated Snowflake REST API calls  
+async function createSnowflakeSession(account: string, username: string, password: string, warehouse: string) {
+  const loginUrl = `https://${account}.snowflakecomputing.com/session/v1/login-request`;
+  
+  const loginResponse = await fetch(loginUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json'
+    },
+    body: JSON.stringify({
+      data: {
+        ACCOUNT_NAME: account,
+        LOGIN_NAME: username,  
+        PASSWORD: password
+      }
+    })
+  });
+
+  if (!loginResponse.ok) {
+    const errorText = await loginResponse.text();
+    throw new Error(`Snowflake login failed: ${loginResponse.status} - ${errorText}`);
+  }
+
+  const loginResult = await loginResponse.json();
+  return loginResult.data;
+}
+
+async function executeSnowflakeQuery(sessionData: any, account: string, sqlText: string, warehouse?: string) {
+  const queryUrl = `https://${account}.snowflakecomputing.com/queries/v1/query-request`;
+  
+  const body: any = {
+    sqlText,
+    sequenceId: Date.now()
+  };
+  
+  if (warehouse) {
+    body.warehouse = warehouse;
+  }
+
+  const response = await fetch(queryUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': `Snowflake Token="${sessionData.token}"`,
+      'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Snowflake query failed: ${response.status} - ${errorText}`);
+  }
+
+  const result = await response.json();
+  return result;
+}
 
 serve(async (req) => {
   // Handle CORS preflight requests
@@ -33,69 +91,36 @@ serve(async (req) => {
       });
     }
 
-    console.log('Connecting to Snowflake with account:', snowflakeAccount);
+    console.log('Creating Snowflake session...');
+    const sessionData = await createSnowflakeSession(snowflakeAccount, snowflakeUser, snowflakePassword, snowflakeWarehouse);
     
-    // Import Snowflake SDK
-    const snowflake = await import('https://cdn.skypack.dev/snowflake-sdk@2.2.0');
+    // Execute query to list databases using REST API
+    const result = await executeSnowflakeQuery(sessionData, snowflakeAccount, 'SHOW DATABASES IN ACCOUNT', snowflakeWarehouse);
+
+    console.log('Snowflake query result:', result);
     
-    // Create Snowflake connection using integration pattern
-    const connection = snowflake.createConnection({
-      account: snowflakeAccount,
-      username: snowflakeUser,
-      password: snowflakePassword,
-      warehouse: snowflakeWarehouse,
-    });
-
-    // Connect to Snowflake
-    await new Promise((resolve, reject) => {
-      connection.connect((err: any, conn: any) => {
-        if (err) {
-          console.error('Failed to connect to Snowflake:', err);
-          reject(err);
-        } else {
-          console.log('Successfully connected to Snowflake');
-          resolve(conn);
-        }
-      });
-    });
-
-    // Execute query to list databases using integration pattern
-    const databases = await new Promise((resolve, reject) => {
-      connection.execute({
-        sqlText: 'SHOW DATABASES IN ACCOUNT',
-        complete: (err: any, stmt: any, rows: any) => {
-          if (err) {
-            console.error('Snowflake error:', err);
-            reject(err);
-          } else {
-            console.log(`Found ${rows.length} databases`);
-            
-            // Filter for Spider2 databases only - matching integration pattern
-            const spider2Databases = rows
-              ?.filter((row: any) => row.name && row.name.toString().startsWith('SPIDER2_'))
-              .map((row: any) => ({
-                name: row.name,
-                display_name: row.name.replace('SPIDER2_', ''),
-                created_on: row.created_on,
-                database_id: row.database_id || row.name,
-                owner: row.owner,
-                comment: row.comment || ''
-              }))
-              .sort((a: any, b: any) => a.display_name.localeCompare(b.display_name)) || [];
-            
-            console.log(`Filtered to ${spider2Databases.length} Spider2 databases`);
-            resolve(spider2Databases);
-          }
-        }
-      });
-    });
-
-    // Close connection
-    connection.destroy();
+    // Extract database information from the result
+    const rows = result.data || [];
+    console.log(`Found ${rows.length} databases`);
+    
+    // Filter for Spider2 databases only - matching integration pattern
+    const spider2Databases = rows
+      ?.filter((row: any) => row[1] && row[1].toString().startsWith('SPIDER2_')) // row[1] is typically the database name
+      .map((row: any) => ({
+        name: row[1],
+        display_name: row[1].replace('SPIDER2_', ''),
+        created_on: row[2],
+        database_id: row[0] || row[1],
+        owner: row[3],
+        comment: row[4] || ''
+      }))
+      .sort((a: any, b: any) => a.display_name.localeCompare(b.display_name)) || [];
+    
+    console.log(`Filtered to ${spider2Databases.length} Spider2 databases`);
 
     return new Response(JSON.stringify({ 
-      databases,
-      total_count: databases.length,
+      databases: spider2Databases,
+      total_count: spider2Databases.length,
       timestamp: new Date().toISOString()
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
