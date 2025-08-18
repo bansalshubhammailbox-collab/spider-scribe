@@ -38,9 +38,10 @@ serve(async (req) => {
       });
     }
 
-    // Import Google Generative AI
+    // Import Google Generative AI using integration pattern
     const { GoogleGenerativeAI } = await import('https://esm.sh/@google/generative-ai@0.21.0');
     const genAI = new GoogleGenerativeAI(geminiApiKey);
+    // CRITICAL: Use gemini-1.5-flash model as specified in integration
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
     // Generate 3 different SQL queries
@@ -50,41 +51,37 @@ serve(async (req) => {
       fullContext: { sql: '', executed: false, error: null, rowCount: 0 }
     };
 
-    // 1. Baseline SQL (no context)
-    const baselinePrompt = `Generate a SQL query to answer: "${question}" for a database named "${database}". Use generic table names like customers, orders, products, etc. Return only the SQL query without any explanation.`;
+    // Generate 3-way SQL using integration pattern
     
+    // 1. Baseline SQL - no context (generic table names)
+    const baselinePrompt = `Generate SQL for this question using generic table names: ${question}`;
     const baselineResult = await model.generateContent(baselinePrompt);
-    results.baseline.sql = baselineResult.response.text().replace(/```sql\n?/g, '').replace(/```\n?/g, '').trim();
+    results.baseline.sql = extractSQL(baselineResult.response.text());
 
-    // 2. Schema-only SQL (structure context)
-    let schemaOnlyPrompt = `Generate a SQL query to answer: "${question}" for database "${database}".`;
-    if (schema) {
-      const schemaText = JSON.stringify(schema.schemas, null, 2);
-      schemaOnlyPrompt += ` Use this schema structure:\n${schemaText}\nReturn only the SQL query without any explanation.`;
-    } else {
-      schemaOnlyPrompt += ` Return only the SQL query without any explanation.`;
-    }
-    
-    const schemaOnlyResult = await model.generateContent(schemaOnlyPrompt);
-    results.schemaOnly.sql = schemaOnlyResult.response.text().replace(/```sql\n?/g, '').replace(/```\n?/g, '').trim();
+    // 2. Schema-only SQL - structure context only
+    const schemaPrompt = `Generate SQL for: ${question}\n\nDatabase: ${database}\nSchema: ${JSON.stringify(schema)}`;
+    const schemaOnlyResult = await model.generateContent(schemaPrompt);
+    results.schemaOnly.sql = extractSQL(schemaOnlyResult.response.text());
 
-    // 3. Full-context SQL (annotations + schema)
-    let fullContextPrompt = `Generate a SQL query to answer: "${question}" for database "${database}".`;
-    if (customPrompt) {
-      fullContextPrompt += ` Additional context: ${customPrompt}`;
+    // 3. Full context SQL - annotations + schema
+    const fullPrompt = customPrompt || `Generate SQL for: ${question}\n\nDatabase: ${database}\nSchema: ${JSON.stringify(schema)}\nBusiness Context: ${JSON.stringify(annotations)}`;
+    const fullContextResult = await model.generateContent(fullPrompt);
+    results.fullContext.sql = extractSQL(fullContextResult.response.text());
+
+    // Helper function to extract SQL from generated text
+    function extractSQL(text: string): string {
+      // Extract SQL from generated text
+      const sqlMatch = text.match(/```sql\s*([\s\S]*?)\s*```/i) || 
+                       text.match(/```\s*(SELECT[\s\S]*?)\s*```/i);
+      
+      if (sqlMatch) {
+        return sqlMatch[1].trim();
+      }
+      
+      // If no code blocks, look for SELECT statements
+      const selectMatch = text.match(/(SELECT[\s\S]*?(?:;|$))/i);
+      return selectMatch ? selectMatch[1].trim() : text.trim();
     }
-    if (schema) {
-      const schemaText = JSON.stringify(schema.schemas, null, 2);
-      fullContextPrompt += ` Schema structure:\n${schemaText}`;
-    }
-    if (annotations) {
-      const annotationsText = JSON.stringify(annotations.annotations, null, 2);
-      fullContextPrompt += ` Business context and annotations:\n${annotationsText}`;
-    }
-    fullContextPrompt += ` Return only the SQL query without any explanation.`;
-    
-    const fullContextResult = await model.generateContent(fullContextPrompt);
-    results.fullContext.sql = fullContextResult.response.text().replace(/```sql\n?/g, '').replace(/```\n?/g, '').trim();
 
     // TODO: Execute queries against Snowflake to get actual results
     // For now, marking as executed with placeholder data

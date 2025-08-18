@@ -57,22 +57,22 @@ serve(async (req) => {
       });
     }
 
-    // Import Google Generative AI
+    // Import Google Generative AI using integration pattern
     const { GoogleGenerativeAI } = await import('https://esm.sh/@google/generative-ai@0.21.0');
     
     const genAI = new GoogleGenerativeAI(geminiApiKey);
+    // CRITICAL: Use gemini-1.5-flash model as specified in integration
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-    // Prepare schema data for prompt
+    // Use integration pattern for annotation generation
     const schemaText = JSON.stringify(schema, null, 2);
-    const finalPrompt = customPrompt 
-      ? `${customPrompt}\n\n${SME_PROMPT}\n\nSchema Data:\n${schemaText}`
-      : `${SME_PROMPT}\n\nSchema Data:\n${schemaText}`;
+    const finalPrompt = customPrompt || SME_PROMPT;
+    const fullPrompt = `${finalPrompt}\n\nSchema to analyze:\n${schemaText}`;
 
-    console.log('Sending request to Gemini 1.5-flash...');
+    console.log('Generating annotations with Gemini 1.5-flash...');
     
-    // Generate annotations
-    const result = await model.generateContent(finalPrompt);
+    // Generate annotations using integration pattern
+    const result = await model.generateContent(fullPrompt);
     const response = await result.response;
     let generatedText = response.text();
 

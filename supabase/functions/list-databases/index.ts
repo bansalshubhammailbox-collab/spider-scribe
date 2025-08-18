@@ -38,7 +38,7 @@ serve(async (req) => {
     // Import Snowflake SDK
     const snowflake = await import('https://cdn.skypack.dev/snowflake-sdk@2.2.0');
     
-    // Create Snowflake connection
+    // Create Snowflake connection using integration pattern
     const connection = snowflake.createConnection({
       account: snowflakeAccount,
       username: snowflakeUser,
@@ -59,32 +59,29 @@ serve(async (req) => {
       });
     });
 
-    // Execute query to list databases
+    // Execute query to list databases using integration pattern
     const databases = await new Promise((resolve, reject) => {
       connection.execute({
         sqlText: 'SHOW DATABASES IN ACCOUNT',
         complete: (err: any, stmt: any, rows: any) => {
           if (err) {
-            console.error('Error executing SHOW DATABASES:', err);
+            console.error('Snowflake error:', err);
             reject(err);
           } else {
             console.log(`Found ${rows.length} databases`);
             
-            // Filter for SPIDER2_ databases and format results
+            // Filter for Spider2 databases only - matching integration pattern
             const spider2Databases = rows
+              ?.filter((row: any) => row.name && row.name.toString().startsWith('SPIDER2_'))
               .map((row: any) => ({
                 name: row.name,
                 display_name: row.name.replace('SPIDER2_', ''),
                 created_on: row.created_on,
-                is_default: row.is_default === 'Y',
-                is_current: row.is_current === 'Y',
-                database_id: row.database_id,
+                database_id: row.database_id || row.name,
                 owner: row.owner,
-                comment: row.comment,
-                retention_time: row.retention_time
+                comment: row.comment || ''
               }))
-              .filter((db: any) => db.name.startsWith('SPIDER2_'))
-              .sort((a: any, b: any) => a.display_name.localeCompare(b.display_name));
+              .sort((a: any, b: any) => a.display_name.localeCompare(b.display_name)) || [];
             
             console.log(`Filtered to ${spider2Databases.length} Spider2 databases`);
             resolve(spider2Databases);
