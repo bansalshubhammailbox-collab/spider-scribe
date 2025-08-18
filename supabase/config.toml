@@ -1,1 +1,13 @@
 project_id = "fuvvwmwoscqaejpaensb"
+
+[functions.list-databases]
+verify_jwt = false
+
+[functions.extract-schema]
+verify_jwt = false
+
+[functions.generate-annotations]
+verify_jwt = false
+
+[functions.test-sql-comparison]
+verify_jwt = false
