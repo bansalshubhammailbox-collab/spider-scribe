@@ -5,33 +5,6 @@ interface SnowflakeConfig {
   warehouse?: string;
 }
 
-interface SnowflakeAuthResponse {
-  success: boolean;
-  data: {
-    token: string;
-    masterToken: string;
-    validityInSecondsST: number;
-    validityInSecondsMT: number;
-  };
-}
-
-interface SnowflakeQueryResponse {
-  success: boolean;
-  data: {
-    rowset: any[][];
-    rowtype: Array<{
-      name: string;
-      type: string;
-      length?: number;
-      precision?: number;
-      scale?: number;
-      nullable: boolean;
-    }>;
-    total: number;
-    returned: number;
-  };
-}
-
 export class SnowflakeRestClient {
   private config: SnowflakeConfig;
   private sessionToken: string | null = null;
@@ -57,14 +30,9 @@ export class SnowflakeRestClient {
             ACCOUNT_NAME: this.config.account,
             LOGIN_NAME: this.config.user,
             PASSWORD: this.config.password,
-            CLIENT_APP_ID: "JavaScript",
-            CLIENT_APP_VERSION: "1.6.0",
-            CLIENT_ENVIRONMENT: {
-              APPLICATION: "Deno",
-              OS: "Linux",
-              OS_VERSION: "Unknown"
-            }
-          },
+            CLIENT_APP_ID: "JavaScriptDriver",
+            CLIENT_APP_VERSION: "1.6.0"
+          }
         }),
       });
 
@@ -74,7 +42,7 @@ export class SnowflakeRestClient {
         return false;
       }
 
-      const authResponse: SnowflakeAuthResponse = await response.json();
+      const authResponse = await response.json();
       
       if (!authResponse.success) {
         console.error('Snowflake authentication failed:', authResponse);
@@ -90,7 +58,7 @@ export class SnowflakeRestClient {
     }
   }
 
-  async executeQuery(sql: string, warehouse?: string): Promise<any[][]> {
+  async executeQuery(sql: string): Promise<any[][]> {
     if (!this.sessionToken) {
       const authenticated = await this.authenticate();
       if (!authenticated) {
@@ -99,26 +67,21 @@ export class SnowflakeRestClient {
     }
 
     try {
-      console.log(`Executing Snowflake query: ${sql.substring(0, 100)}...`);
+      console.log(`Executing Snowflake query: ${sql}`);
       
-      const requestBody: any = {
+      const requestBody = {
         sqlText: sql,
         asyncExec: false,
-        sequenceId: 1,
-        querySubmissionTime: Date.now()
+        sequenceId: 0,
+        warehouse: this.config.warehouse || 'COMPUTE_WH_PARTICIPANT'
       };
-
-      if (warehouse || this.config.warehouse) {
-        requestBody.warehouse = warehouse || this.config.warehouse;
-      }
 
       const response = await fetch(`${this.baseUrl}/queries/v1/query-request`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': `Snowflake Token="${this.sessionToken}"`,
-          'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT'
+          'Authorization': `Snowflake Token="${this.sessionToken}"`
         },
         body: JSON.stringify(requestBody),
       });
@@ -132,22 +95,22 @@ export class SnowflakeRestClient {
           this.sessionToken = null;
           const authenticated = await this.authenticate();
           if (authenticated) {
-            return this.executeQuery(sql, warehouse);
+            return this.executeQuery(sql);
           }
         }
         
         throw new Error(`Snowflake query failed: ${response.status} - ${errorText}`);
       }
 
-      const result: SnowflakeQueryResponse = await response.json();
+      const result = await response.json();
       
       if (!result.success) {
         console.error('Snowflake query execution failed:', result);
-        throw new Error('Query execution failed');
+        throw new Error(`Query execution failed: ${JSON.stringify(result)}`);
       }
 
-      console.log(`Query executed successfully, returned ${result.data.returned} rows`);
-      return result.data.rowset || [];
+      console.log(`Query executed successfully, returned ${result.data?.rowset?.length || 0} rows`);
+      return result.data?.rowset || [];
     } catch (error) {
       console.error('Snowflake query execution error:', error);
       throw error;
@@ -166,13 +129,18 @@ export class SnowflakeRestClient {
   }
 
   async getSchemas(database: string): Promise<string[]> {
-    const rows = await this.executeQuery(`USE DATABASE ${database}; SHOW SCHEMAS;`);
-    return rows.map(row => row[1].toString());
+    // First set the database context
+    await this.executeQuery(`USE DATABASE ${database}`);
+    const rows = await this.executeQuery('SHOW SCHEMAS');
+    return rows
+      .map(row => row[1]?.toString())
+      .filter(name => name && name !== 'INFORMATION_SCHEMA');
   }
 
   async getTables(database: string, schema: string): Promise<string[]> {
-    const rows = await this.executeQuery(`USE DATABASE ${database}; SHOW TABLES IN SCHEMA ${schema};`);
-    return rows.map(row => row[1].toString());
+    await this.executeQuery(`USE DATABASE ${database}`);
+    const rows = await this.executeQuery(`SHOW TABLES IN SCHEMA ${schema}`);
+    return rows.map(row => row[1]?.toString()).filter(Boolean);
   }
 
   async getTableColumns(database: string, schema: string, table: string): Promise<Array<{
@@ -181,11 +149,12 @@ export class SnowflakeRestClient {
     nullable: boolean;
     default?: string;
   }>> {
-    const rows = await this.executeQuery(`USE DATABASE ${database}; DESCRIBE TABLE ${schema}.${table};`);
+    await this.executeQuery(`USE DATABASE ${database}`);
+    const rows = await this.executeQuery(`DESCRIBE TABLE ${schema}.${table}`);
     
     return rows.map(row => ({
-      name: row[0].toString(),
-      type: row[1].toString(),
+      name: row[0]?.toString() || '',
+      type: row[1]?.toString() || '',
       nullable: row[2] === 'Y',
       default: row[3] ? row[3].toString() : undefined
     }));
@@ -194,9 +163,8 @@ export class SnowflakeRestClient {
   async getSampleData(database: string, schema: string, table: string, limit: number = 3): Promise<any[][]> {
     if (limit === 0) return [];
     
-    const rows = await this.executeQuery(
-      `USE DATABASE ${database}; SELECT * FROM ${schema}.${table} LIMIT ${limit};`
-    );
+    await this.executeQuery(`USE DATABASE ${database}`);
+    const rows = await this.executeQuery(`SELECT * FROM ${schema}.${table} LIMIT ${limit}`);
     return rows;
   }
 }
@@ -208,8 +176,10 @@ export function createSnowflakeClient(): SnowflakeRestClient {
   const warehouse = Deno.env.get('SNOWFLAKE_WAREHOUSE');
 
   if (!account || !user || !password) {
-    throw new Error('Missing required Snowflake environment variables');
+    throw new Error('Missing required Snowflake environment variables: SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD');
   }
+
+  console.log(`Creating Snowflake client for account: ${account}, user: ${user}, warehouse: ${warehouse || 'COMPUTE_WH_PARTICIPANT'}`);
 
   return new SnowflakeRestClient({
     account,
