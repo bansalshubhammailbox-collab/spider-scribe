@@ -1,3 +1,25 @@
+# Android / Gradle
+.gradle/
+build/
+*/build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+bin/
+gen/
+out/
+captures/
+.externalNativeBuild
+*.jks
+*.keystore
+google-services.json
+
 # Logs
 logs
 *.log
@@ -7,6 +29,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Node (legacy from old web app)
 node_modules
 dist
 dist-ssr
@@ -15,10 +38,11 @@ dist-ssr
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
-.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Environment
+.env
